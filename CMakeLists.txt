@@ -143,6 +143,7 @@ add_library(chrome_plus SHARED
   src/hijack.cc
   src/inputhook.cc
   src/tabbookmark.cc
+  src/toast.cc
   src/uia.cc
   src/utils.cc
 )

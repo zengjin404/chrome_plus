@@ -6,6 +6,7 @@
 #include "hijack.h"
 #include "inputhook.h"
 #include "tabbookmark.h"
+#include "toast.h"
 #include "utils.h"
 
 using Startup = int (*)();
@@ -17,6 +18,9 @@ void ChromePlus() {
 
   // Install input hooks.
   InstallInputHooks();
+
+  // Initialize settings page toast notification.
+  InitSettingsToast();
 }
 
 int Loader() {
