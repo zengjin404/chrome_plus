@@ -142,8 +142,9 @@ add_library(chrome_plus SHARED
   src/chrome++.rc
   src/hijack.cc
   src/inputhook.cc
+  src/pakfile.cc
+  src/pakpatch.cc
   src/tabbookmark.cc
-  src/toast.cc
   src/uia.cc
   src/utils.cc
 )
@@ -180,6 +181,7 @@ target_link_libraries(chrome_plus PRIVATE
   onecore
   oleacc
   detours
+  mini_gzip
 )
 
 target_link_options(chrome_plus PRIVATE

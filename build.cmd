@@ -134,7 +134,6 @@ cmake -E make_directory "%output_dir%"
 if errorlevel 1 exit /b %errorlevel%
 cmake -E copy_if_different ^
   "%artifact_dir%\version.dll" ^
-  "%source_dir%src\chrome++.ini" ^
   "%output_dir%"
 if errorlevel 1 exit /b %errorlevel%
 if exist "%artifact_dir%\version.pdb" (

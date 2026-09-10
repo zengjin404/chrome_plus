@@ -5,8 +5,8 @@
 #include "detours.h"
 #include "hijack.h"
 #include "inputhook.h"
+#include "pakpatch.h"
 #include "tabbookmark.h"
-#include "toast.h"
 #include "utils.h"
 
 using Startup = int (*)();
@@ -19,15 +19,16 @@ void ChromePlus() {
   // Install input hooks.
   InstallInputHooks();
 
-  // Initialize settings page toast notification.
-  InitSettingsToast();
+  // Patch resources.pak for settings page about info.
+  PakPatch();
 }
 
 int Loader() {
-  // Only hook into the main browser process, skip renderers, gpu, etc.
   LPWSTR param = GetCommandLineW();
   if (!wcsstr(param, L"-type=")) {
     ChromePlus();
+  } else if (wcsstr(param, L"--type=renderer")) {
+    PakPatch();
   }
 
   // Return to the main function.
