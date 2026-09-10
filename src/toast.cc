@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <shellapi.h>
 
+#include <algorithm>
 #include <string>
 #include <string_view>
 
@@ -11,14 +12,16 @@
 namespace {
 
 constexpr wchar_t kToastClassName[] = L"ChromePlus_SettingsToast";
-constexpr int kToastWidth = 320;
-constexpr int kToastHeight = 68;
+constexpr int kToastHeight = 64;
 constexpr UINT_PTR kCheckTimerId = 0x545354;  // 'TST'
 
 HWND g_toast_hwnd = nullptr;
 HWND g_owner_chrome_hwnd = nullptr;
 bool g_dismissed_for_this_visit = false;
 bool g_was_in_settings = false;
+
+// Dynamic card dimensions (content-adaptive)
+int g_toast_width = 240;
 
 // Hover states
 bool g_hover_close = false;
@@ -28,6 +31,12 @@ RECT g_close_rect = {};
 
 HWINEVENTHOOK g_title_hook = nullptr;
 UINT_PTR g_ambient_timer_id = 0;
+
+// Text definitions (strictly plain text, no decorative symbols, no bold)
+constexpr wchar_t kTopText[] = L"[双击关闭标签页] 功能已就绪";
+constexpr wchar_t kPrefixText[] = L"由 ";
+constexpr wchar_t kLinkText[] = L"增进工坊";
+constexpr wchar_t kSuffixText[] = L" 强力驱动";
 
 bool IsDarkMode() {
   DWORD data = 1;
@@ -43,6 +52,13 @@ bool IsDarkMode() {
 }
 
 bool IsSettingsPageTitle(std::wstring_view title) {
+  // Exclude standalone DevTools windows first (e.g. "DevTools - ...", "Developer Tools - ...")
+  if (title.find(L"DevTools") != std::wstring_view::npos ||
+      title.find(L"Developer Tools") != std::wstring_view::npos ||
+      title.find(L"chrome-devtools://") != std::wstring_view::npos) {
+    return false;
+  }
+
   // Chrome settings pages include:
   // "设置", "关于 Chrome", "关于 Chromium", "Settings", "About Chrome", "About Chromium"
   if (title.find(L"设置") != std::wstring_view::npos ||
@@ -52,6 +68,92 @@ bool IsSettingsPageTitle(std::wstring_view title) {
     return true;
   }
   return false;
+}
+
+// Measures exact text dimensions using standard regular font to dynamically fit card width.
+int CalculateAdaptiveWidth(HWND hwnd) {
+  HDC hdc = GetDC(hwnd);
+  if (!hdc) {
+    return 240;
+  }
+
+  HFONT font = CreateFontW(
+      -12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+      OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+      DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+  HFONT old_font = static_cast<HFONT>(SelectObject(hdc, font));
+
+  SIZE top_sz = {};
+  GetTextExtentPoint32W(hdc, kTopText, static_cast<int>(wcslen(kTopText)), &top_sz);
+
+  SIZE pfx_sz = {}, lnk_sz = {}, sfx_sz = {};
+  GetTextExtentPoint32W(hdc, kPrefixText, static_cast<int>(wcslen(kPrefixText)), &pfx_sz);
+  GetTextExtentPoint32W(hdc, kLinkText, static_cast<int>(wcslen(kLinkText)), &lnk_sz);
+  GetTextExtentPoint32W(hdc, kSuffixText, static_cast<int>(wcslen(kSuffixText)), &sfx_sz);
+
+  SelectObject(hdc, old_font);
+  DeleteObject(font);
+  ReleaseDC(hwnd, hdc);
+
+  const int line1_w = top_sz.cx + 28;  // text + gap + close button
+  const int line2_w = pfx_sz.cx + lnk_sz.cx + sfx_sz.cx;
+
+  // Margin: 16px left + 16px right padding
+  const int target_w = (std::max)(line1_w, line2_w) + 32;
+  return target_w;
+}
+
+// Locates the actual web contents viewport rect to avoid docking DevTools (right/bottom)
+RECT GetSettingsContentArea(HWND owner) {
+  RECT rcClient = {};
+  GetClientRect(owner, &rcClient);
+
+  // Search child windows for docked DevTools or web contents bounds if present
+  // In Chromium, if DevTools is docked, inspecting child HWNDs or clipping provides safe margins
+  struct DockContext {
+    HWND owner;
+    RECT content_rect;
+    bool found_docked_devtools;
+  } ctx = {owner, rcClient, false};
+
+  EnumChildWindows(
+      owner,
+      [](HWND child, LPARAM lParam) -> BOOL {
+        if (!IsWindowVisible(child)) {
+          return TRUE;
+        }
+
+        auto* pCtx = reinterpret_cast<DockContext*>(lParam);
+        wchar_t cls[64] = {};
+        GetClassNameW(child, cls, static_cast<int>(std::size(cls)));
+
+        // If a docked DevTools sub-window or side panel is detected
+        if (wcscmp(cls, L"Chrome_WidgetWin_1") == 0 && child != pCtx->owner) {
+          RECT r = {};
+          GetWindowRect(child, &r);
+          POINT pt_tl = {r.left, r.top};
+          POINT pt_br = {r.right, r.bottom};
+          ScreenToClient(pCtx->owner, &pt_tl);
+          ScreenToClient(pCtx->owner, &pt_br);
+
+          // If docked to the right side (occupying right portion)
+          if (pt_tl.x > pCtx->content_rect.left + 200 &&
+              pt_br.x >= pCtx->content_rect.right - 20) {
+            pCtx->content_rect.right = (std::min)(pCtx->content_rect.right, static_cast<LONG>(pt_tl.x));
+            pCtx->found_docked_devtools = true;
+          }
+          // If docked to the bottom (occupying bottom portion)
+          else if (pt_tl.y > pCtx->content_rect.top + 150 &&
+                   pt_br.y >= pCtx->content_rect.bottom - 20) {
+            pCtx->content_rect.bottom = (std::min)(pCtx->content_rect.bottom, static_cast<LONG>(pt_tl.y));
+            pCtx->found_docked_devtools = true;
+          }
+        }
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&ctx));
+
+  return ctx.content_rect;
 }
 
 void UpdateToastPosition(HWND toast, HWND owner) {
@@ -64,23 +166,29 @@ void UpdateToastPosition(HWND toast, HWND owner) {
     return;
   }
 
-  RECT rcClient;
-  if (!GetClientRect(owner, &rcClient)) {
-    return;
+  // Content-adaptive width calculation
+  const int target_width = CalculateAdaptiveWidth(toast);
+  if (target_width != g_toast_width) {
+    g_toast_width = target_width;
+    HRGN rgn = CreateRoundRectRgn(0, 0, g_toast_width + 1, kToastHeight + 1, 14, 14);
+    SetWindowRgn(toast, rgn, TRUE);
   }
 
-  // Position at bottom-right corner with 24px margin
-  POINT pt = {rcClient.right - kToastWidth - 24,
-              rcClient.bottom - kToastHeight - 24};
+  // Obtain compatible viewport bounding rect (auto-accommodating docked DevTools)
+  const RECT content_area = GetSettingsContentArea(owner);
+
+  // Position at bottom-right of the actual settings content area with 20px margin
+  POINT pt = {content_area.right - g_toast_width - 20,
+              content_area.bottom - kToastHeight - 20};
   ClientToScreen(owner, &pt);
 
   RECT rcToast = {};
   GetWindowRect(toast, &rcToast);
   if (rcToast.left != pt.x || rcToast.top != pt.y ||
-      (rcToast.right - rcToast.left) != kToastWidth ||
+      (rcToast.right - rcToast.left) != g_toast_width ||
       (rcToast.bottom - rcToast.top) != kToastHeight ||
       !IsWindowVisible(toast)) {
-    SetWindowPos(toast, HWND_TOP, pt.x, pt.y, kToastWidth, kToastHeight,
+    SetWindowPos(toast, HWND_TOP, pt.x, pt.y, g_toast_width, kToastHeight,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
   }
 }
@@ -107,96 +215,82 @@ void PaintToast(HWND hwnd, HDC hdc) {
   FillRect(mem_dc, &rc, bg_brush);
   DeleteObject(bg_brush);
 
-  // 2. Draw border
+  // 2. Draw rounded border
   HPEN border_pen = CreatePen(PS_SOLID, 1, border_color);
   HPEN old_pen = static_cast<HPEN>(SelectObject(mem_dc, border_pen));
   HBRUSH null_brush = static_cast<HBRUSH>(GetStockObject(NULL_BRUSH));
   HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(mem_dc, null_brush));
-  RoundRect(mem_dc, rc.left, rc.top, rc.right, rc.bottom, 16, 16);
+  RoundRect(mem_dc, rc.left, rc.top, rc.right, rc.bottom, 14, 14);
   SelectObject(mem_dc, old_brush);
   SelectObject(mem_dc, old_pen);
   DeleteObject(border_pen);
 
   SetBkMode(mem_dc, TRANSPARENT);
 
-  // 3. Top Line: [⚡ 双击标签页关闭 · 已就绪]
-  HFONT title_font = CreateFontW(
-      -13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-      OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-      DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-  HFONT old_font = static_cast<HFONT>(SelectObject(mem_dc, title_font));
-  SetTextColor(mem_dc, text_primary);
-
-  RECT top_rc = {16, 13, rc.right - 36, 33};
-  const std::wstring top_text = L"⚡ 双击标签页关闭 · 已就绪";
-  DrawTextW(mem_dc, top_text.c_str(), -1, &top_rc,
-            DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-
-  // 4. Bottom Line: 由 [增进工坊] 强力驱动 ↗
-  HFONT body_font = CreateFontW(
+  // Standard regular font: FW_NORMAL, clean and without any bolding
+  HFONT normal_font = CreateFontW(
       -12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
       DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-  SelectObject(mem_dc, body_font);
+  HFONT old_font = static_cast<HFONT>(SelectObject(mem_dc, normal_font));
 
+  // 3. Top Line: [双击关闭标签页] 功能已就绪
+  SetTextColor(mem_dc, text_primary);
+  RECT top_rc = {16, 12, rc.right - 32, 30};
+  DrawTextW(mem_dc, kTopText, -1, &top_rc,
+            DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+
+  // 4. Bottom Line: 由 增进工坊 强力驱动
   int x = 16;
-  const int y = 38;
+  const int y = 35;
 
   // Prefix: "由 "
   SetTextColor(mem_dc, text_secondary);
-  const std::wstring prefix = L"由 ";
-  RECT prefix_rc = {x, y, x + 50, y + 18};
-  DrawTextW(mem_dc, prefix.c_str(), -1, &prefix_rc,
+  RECT prefix_rc = {x, y, x + 40, y + 18};
+  DrawTextW(mem_dc, kPrefixText, -1, &prefix_rc,
             DT_CALCRECT | DT_SINGLELINE | DT_VCENTER);
-  DrawTextW(mem_dc, prefix.c_str(), -1, &prefix_rc,
+  DrawTextW(mem_dc, kPrefixText, -1, &prefix_rc,
             DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
   x += (prefix_rc.right - prefix_rc.left);
 
-  // Link: "增进工坊"
+  // Link: "增进工坊" (Regular weight, underlined only on hover)
   HFONT link_font = CreateFontW(
-      -12, 0, 0, 0, FW_MEDIUM, FALSE, g_hover_link ? TRUE : FALSE, FALSE,
+      -12, 0, 0, 0, FW_NORMAL, FALSE, g_hover_link ? TRUE : FALSE, FALSE,
       DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
       CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
   SelectObject(mem_dc, link_font);
   SetTextColor(mem_dc, link_color);
 
-  const std::wstring link_text = L"增进工坊";
-  RECT link_calc = {x, y, x + 100, y + 18};
-  DrawTextW(mem_dc, link_text.c_str(), -1, &link_calc,
+  RECT link_calc = {x, y, x + 80, y + 18};
+  DrawTextW(mem_dc, kLinkText, -1, &link_calc,
             DT_CALCRECT | DT_SINGLELINE | DT_VCENTER);
-  DrawTextW(mem_dc, link_text.c_str(), -1, &link_calc,
+  DrawTextW(mem_dc, kLinkText, -1, &link_calc,
             DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
   g_link_rect = link_calc;
   x += (link_calc.right - link_calc.left);
 
-  // Suffix: " 强力驱动 ↗"
-  SelectObject(mem_dc, body_font);
+  // Suffix: " 强力驱动"
+  SelectObject(mem_dc, normal_font);
   SetTextColor(mem_dc, text_secondary);
-  const std::wstring suffix = L" 强力驱动 ↗";
-  RECT suffix_rc = {x, y, rc.right - 36, y + 18};
-  DrawTextW(mem_dc, suffix.c_str(), -1, &suffix_rc,
+  RECT suffix_rc = {x, y, rc.right - 16, y + 18};
+  DrawTextW(mem_dc, kSuffixText, -1, &suffix_rc,
             DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
 
   // 5. Close Button (✕)
-  g_close_rect = {rc.right - 28, 11, rc.right - 10, 29};
+  g_close_rect = {rc.right - 26, 10, rc.right - 10, 26};
   if (g_hover_close) {
     HBRUSH close_brush = CreateSolidBrush(close_hover_bg);
     HPEN close_pen = CreatePen(PS_SOLID, 1, border_color);
     HPEN old_cp = static_cast<HPEN>(SelectObject(mem_dc, close_pen));
     HBRUSH old_cb = static_cast<HBRUSH>(SelectObject(mem_dc, close_brush));
     RoundRect(mem_dc, g_close_rect.left, g_close_rect.top, g_close_rect.right,
-              g_close_rect.bottom, 6, 6);
+              g_close_rect.bottom, 4, 4);
     SelectObject(mem_dc, old_cb);
     SelectObject(mem_dc, old_cp);
     DeleteObject(close_brush);
     DeleteObject(close_pen);
   }
 
-  HFONT close_font = CreateFontW(
-      -11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-      OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-      DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-  SelectObject(mem_dc, close_font);
   SetTextColor(mem_dc, text_secondary);
   DrawTextW(mem_dc, L"✕", -1, &g_close_rect,
             DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -206,10 +300,8 @@ void PaintToast(HWND hwnd, HDC hdc) {
 
   // Cleanup
   SelectObject(mem_dc, old_font);
-  DeleteObject(title_font);
-  DeleteObject(body_font);
+  DeleteObject(normal_font);
   DeleteObject(link_font);
-  DeleteObject(close_font);
   SelectObject(mem_dc, old_bm);
   DeleteObject(mem_bm);
   DeleteDC(mem_dc);
@@ -308,7 +400,11 @@ HWND FindActiveChromeWindow() {
       wchar_t cls[64] = {};
       GetClassNameW(fg, cls, static_cast<int>(std::size(cls)));
       if (wcscmp(cls, L"Chrome_WidgetWin_1") == 0) {
-        return fg;
+        wchar_t title[256] = {};
+        GetWindowTextW(fg, title, static_cast<int>(std::size(title)));
+        if (IsSettingsPageTitle(title)) {
+          return fg;
+        }
       }
     }
   }
@@ -323,8 +419,12 @@ HWND FindActiveChromeWindow() {
           wchar_t cls[64] = {};
           GetClassNameW(hwnd, cls, static_cast<int>(std::size(cls)));
           if (wcscmp(cls, L"Chrome_WidgetWin_1") == 0) {
-            *reinterpret_cast<HWND*>(lParam) = hwnd;
-            return FALSE;
+            wchar_t title[256] = {};
+            GetWindowTextW(hwnd, title, static_cast<int>(std::size(title)));
+            if (IsSettingsPageTitle(title)) {
+              *reinterpret_cast<HWND*>(lParam) = hwnd;
+              return FALSE;
+            }
           }
         }
         return TRUE;
@@ -433,12 +533,12 @@ void UpdateSettingsToast(HWND chrome_hwnd) {
       // Create owned popup tool window (never steals focus, never in taskbar)
       g_toast_hwnd = CreateWindowExW(
           WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kToastClassName,
-          L"ChromePlusToast", WS_POPUP | WS_CLIPSIBLINGS, 0, 0, kToastWidth,
+          L"ChromePlusToast", WS_POPUP | WS_CLIPSIBLINGS, 0, 0, g_toast_width,
           kToastHeight, chrome_hwnd, nullptr, hInstance, nullptr);
 
       if (g_toast_hwnd) {
-        HRGN rgn = CreateRoundRectRgn(0, 0, kToastWidth + 1, kToastHeight + 1,
-                                      16, 16);
+        HRGN rgn = CreateRoundRectRgn(0, 0, g_toast_width + 1, kToastHeight + 1,
+                                      14, 14);
         SetWindowRgn(g_toast_hwnd, rgn, TRUE);
         SetTimer(g_toast_hwnd, kCheckTimerId, 400, nullptr);
       }
