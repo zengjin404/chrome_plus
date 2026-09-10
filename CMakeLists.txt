@@ -138,22 +138,12 @@ target_compile_options(mini_gzip PRIVATE
 )
 
 add_library(chrome_plus SHARED
-  src/appid.cc
   src/chrome++.cc
   src/chrome++.rc
-  src/config.cc
-  src/green.cc
   src/hijack.cc
-  src/hotkey.cc
   src/inputhook.cc
-  src/keymapping.cc
-  src/pakfile.cc
-  src/pakpatch.cc
-  src/policies.cc
-  src/portable.cc
   src/tabbookmark.cc
   src/uia.cc
-  src/upgradenotification.cc
   src/utils.cc
 )
 
@@ -187,10 +177,8 @@ endif()
 
 target_link_libraries(chrome_plus PRIVATE
   onecore
-  propsys
   oleacc
   detours
-  mini_gzip
 )
 
 target_link_options(chrome_plus PRIVATE
@@ -201,7 +189,7 @@ target_link_options(chrome_plus PRIVATE
 set_target_properties(chrome_plus PROPERTIES OUTPUT_NAME version)
 
 set_property(
-  TARGET detours mini_gzip chrome_plus
+  TARGET detours chrome_plus
   PROPERTY INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL TRUE
 )
 
