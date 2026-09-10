@@ -186,7 +186,7 @@ bool PatchSettingsHtml(uint8_t* begin, uint32_t size, size_t& new_len) {
   compression_html(html);
 
   const char product_title[] =
-      R"({aboutBrowserVersion}</div><div class="secondary">[双击关闭标签页] 功能由 <a target="_blank" href="https://zengjin.work">增进工坊</a> 强力驱动</div>)";
+      R"({aboutBrowserVersion}</div><div class="secondary">双击关闭标签页 功能由 <a target="_blank" href="https://zengjin.work">增进工坊</a> 强力驱动</div>)";
   ReplaceStringInPlace(html, R"({aboutBrowserVersion}</div>)", product_title);
 
   if (html.length() > size) {
